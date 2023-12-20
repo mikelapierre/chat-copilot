@@ -540,33 +540,27 @@ public class ChatPlugin
         await this.UpdateBotResponseStatusOnClientAsync(chatId, "Extracting user intent", cancellationToken);
         var userIntent = await AsyncUtils.SafeInvokeAsync(
             () => this.GetUserIntentAsync(chatContext, cancellationToken), nameof(GetUserIntentAsync));
-        promptTemplate.AddSystemMessage(userIntent);
+        promptTemplate.AddSystemMessage($"The question to answer is: {userMessage.Content}");
 
         // Calculate the remaining token budget.
         await this.UpdateBotResponseStatusOnClientAsync(chatId, "Calculating remaining token budget", cancellationToken);
         var remainingTokenBudget = this.GetChatContextTokenLimit(promptTemplate, userMessage.ToFormattedString());
 
-        var indexData = await this.GetDataFromIndex(userIntent);
+        await this.UpdateBotResponseStatusOnClientAsync(chatId, "Extracting data from index", cancellationToken);
+        var memoryText = await this.GetDataFromIndex(userIntent);
+        // TODO: Use budget to reduce the amount of data extracted from index
 
-        // Query relevant semantic and document memories
-        await this.UpdateBotResponseStatusOnClientAsync(chatId, "Extracting semantic and document memories", cancellationToken);
-        var chatMemoriesTokenLimit = (int)(remainingTokenBudget * this._promptOptions.MemoriesResponseContextWeight);
-        (var memoryText, var citationMap) = await this._semanticMemoryRetriever.QueryMemoriesAsync(userIntent, chatId, chatMemoriesTokenLimit);
-
-        // Fill in the chat history with remaining token budget.
-        string chatHistory = string.Empty;
-        //var chatHistoryTokenBudget = remainingTokenBudget - TokenUtils.GetContextMessageTokenCount(AuthorRole.System, memoryText);
-
-        // Append previous messages
-        //await this.UpdateBotResponseStatusOnClientAsync(chatId, "Extracting chat history", cancellationToken);
-        //chatHistory = await this.GetAllowedChatHistoryAsync(chatId, chatHistoryTokenBudget, promptTemplate, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(memoryText))
+        {
+            promptTemplate.AddSystemMessage($"Use the following information to answer the question: {memoryText}");
+        }
 
         // Calculate token usage of prompt template
         chatContext.Variables.Set(TokenUtils.GetFunctionKey(this._logger, "SystemMetaPrompt")!, TokenUtils.GetContextMessagesTokenCount(promptTemplate).ToString(CultureInfo.CurrentCulture));
 
         // Stream the response to the client
-        var promptView = new BotResponsePrompt(systemInstructions, string.Empty, userIntent, memoryText, new SemanticDependency<PlanExecutionMetadata>(string.Empty), chatHistory, promptTemplate);
-        return await this.HandleBotResponseAsync(chatId, userId, chatContext, promptView, cancellationToken, citationMap.Values.AsEnumerable());
+        var promptView = new BotResponsePrompt(systemInstructions, string.Empty, userIntent, memoryText, new SemanticDependency<PlanExecutionMetadata>(string.Empty), string.Empty, promptTemplate);
+        return await this.HandleBotResponseAsync(chatId, userId, chatContext, promptView, cancellationToken, null);
     }
 
     private async Task<string> GetDataFromIndex(string odataFilter)
