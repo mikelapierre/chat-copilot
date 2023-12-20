@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
 using System.Linq;
+using System.Net.Http;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -92,6 +93,9 @@ public class ChatPlugin
     /// </summary>
     private readonly AzureContentSafety? _contentSafety = null;
 
+    private readonly AzureAISearchOptions _azureAISearchOptions;
+    private readonly IHttpClientFactory _httpClientFactory;
+
     /// <summary>
     /// Create a new instance of <see cref="ChatPlugin"/>.
     /// </summary>
@@ -103,6 +107,8 @@ public class ChatPlugin
         IHubContext<MessageRelayHub> messageRelayHubContext,
         IOptions<PromptsOptions> promptOptions,
         IOptions<DocumentMemoryOptions> documentImportOptions,
+        IOptions<AzureAISearchOptions> azureAISearchOptions,
+        IHttpClientFactory httpClientFactory,
         CopilotChatPlanner planner,
         ILogger logger,
         AzureContentSafety? contentSafety = null)
@@ -127,6 +133,8 @@ public class ChatPlugin
             planner,
             logger);
         this._contentSafety = contentSafety;
+        this._azureAISearchOptions = azureAISearchOptions.Value;
+        this._httpClientFactory = httpClientFactory;
     }
 
     /// <summary>
@@ -167,7 +175,8 @@ public class ChatPlugin
         // Get token usage from ChatCompletion result and add to context
         TokenUtils.GetFunctionTokenUsage(result, context, this._logger, "SystemIntentExtraction");
 
-        return $"User intent: {result}";
+        //return $"User intent: {result}";
+        return $"{result}";
     }
 
     /// <summary>
@@ -334,7 +343,7 @@ public class ChatPlugin
         var chatContext = context.Clone();
         chatContext.Variables.Set("knowledgeCutoff", this._promptOptions.KnowledgeCutoffDate);
 
-        CopilotChatMessage chatMessage = await this.GetChatResponseAsync(chatId, userId, chatContext, newUserMessage, cancellationToken);
+        CopilotChatMessage chatMessage = await this.GetChatResponseSimpleAsync(chatId, userId, chatContext, newUserMessage, cancellationToken);
         context.Variables.Update(chatMessage.Content);
 
         if (chatMessage.TokenUsage != null)
@@ -508,6 +517,65 @@ public class ChatPlugin
         }
 
         return context;
+    }
+
+    /// <summary>
+    /// Generate the necessary chat context to create a prompt then invoke the model to get a response.
+    /// </summary>
+    /// <param name="chatId">The chat ID</param>
+    /// <param name="userId">The user ID</param>
+    /// <param name="chatContext">The SKContext.</param>
+    /// <param name="userMessage">ChatMessage object representing new user message.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>The created chat message containing the model-generated response.</returns>
+    private async Task<CopilotChatMessage> GetChatResponseSimpleAsync(string chatId, string userId, SKContext chatContext, CopilotChatMessage userMessage, CancellationToken cancellationToken)
+    {
+        // Render system instruction components and create the meta-prompt template
+        var systemInstructions = await AsyncUtils.SafeInvokeAsync(
+            () => this.RenderSystemInstructions(chatId, chatContext, cancellationToken), nameof(RenderSystemInstructions));
+        var chatCompletion = this._kernel.GetService<IChatCompletion>();
+        var promptTemplate = chatCompletion.CreateNewChat(systemInstructions);
+
+        // Extract user intent from the conversation history.
+        await this.UpdateBotResponseStatusOnClientAsync(chatId, "Extracting user intent", cancellationToken);
+        var userIntent = await AsyncUtils.SafeInvokeAsync(
+            () => this.GetUserIntentAsync(chatContext, cancellationToken), nameof(GetUserIntentAsync));
+        promptTemplate.AddSystemMessage(userIntent);
+
+        // Calculate the remaining token budget.
+        await this.UpdateBotResponseStatusOnClientAsync(chatId, "Calculating remaining token budget", cancellationToken);
+        var remainingTokenBudget = this.GetChatContextTokenLimit(promptTemplate, userMessage.ToFormattedString());
+
+        var indexData = await this.GetDataFromIndex(userIntent);
+
+        // Query relevant semantic and document memories
+        await this.UpdateBotResponseStatusOnClientAsync(chatId, "Extracting semantic and document memories", cancellationToken);
+        var chatMemoriesTokenLimit = (int)(remainingTokenBudget * this._promptOptions.MemoriesResponseContextWeight);
+        (var memoryText, var citationMap) = await this._semanticMemoryRetriever.QueryMemoriesAsync(userIntent, chatId, chatMemoriesTokenLimit);
+
+        // Fill in the chat history with remaining token budget.
+        string chatHistory = string.Empty;
+        //var chatHistoryTokenBudget = remainingTokenBudget - TokenUtils.GetContextMessageTokenCount(AuthorRole.System, memoryText);
+
+        // Append previous messages
+        //await this.UpdateBotResponseStatusOnClientAsync(chatId, "Extracting chat history", cancellationToken);
+        //chatHistory = await this.GetAllowedChatHistoryAsync(chatId, chatHistoryTokenBudget, promptTemplate, cancellationToken);
+
+        // Calculate token usage of prompt template
+        chatContext.Variables.Set(TokenUtils.GetFunctionKey(this._logger, "SystemMetaPrompt")!, TokenUtils.GetContextMessagesTokenCount(promptTemplate).ToString(CultureInfo.CurrentCulture));
+
+        // Stream the response to the client
+        var promptView = new BotResponsePrompt(systemInstructions, string.Empty, userIntent, memoryText, new SemanticDependency<PlanExecutionMetadata>(string.Empty), chatHistory, promptTemplate);
+        return await this.HandleBotResponseAsync(chatId, userId, chatContext, promptView, cancellationToken, citationMap.Values.AsEnumerable());
+    }
+
+    private async Task<string> GetDataFromIndex(string odataFilter)
+    {
+        var client = this._httpClientFactory.CreateClient("GetDataFromIndex");
+        client.DefaultRequestHeaders.Add("api-key", this._azureAISearchOptions.APIKey);
+        // TODO: sanitize the odataFilter value
+        var response = await client.GetAsync($"{this._azureAISearchOptions.Endpoint}/indexes('{this._azureAISearchOptions.IndexName}')/docs?$filter={odataFilter}&api-version=2023-11-01");
+        return await response.Content.ReadAsStringAsync();
     }
 
     /// <summary>

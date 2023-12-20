@@ -62,6 +62,8 @@ public static class CopilotChatServiceExtensions
 
         AddOptions<FrontendOptions>(FrontendOptions.PropertyName);
 
+        AddOptions<AzureAISearchOptions>(AzureAISearchOptions.PropertyName);
+
         return services;
 
         void AddOptions<TOptions>(string propertyName)

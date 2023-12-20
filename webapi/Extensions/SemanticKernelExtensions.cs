@@ -162,7 +162,9 @@ internal static class SemanticKernelExtensions
                 documentImportOptions: sp.GetRequiredService<IOptions<DocumentMemoryOptions>>(),
                 contentSafety: sp.GetService<AzureContentSafety>(),
                 planner: sp.GetRequiredService<CopilotChatPlanner>(),
-                logger: sp.GetRequiredService<ILogger<ChatPlugin>>()),
+                logger: sp.GetRequiredService<ILogger<ChatPlugin>>(),
+                azureAISearchOptions: sp.GetRequiredService<IOptions<AzureAISearchOptions>>(),
+                httpClientFactory: sp.GetRequiredService<IHttpClientFactory>()),
             nameof(ChatPlugin));
 
         return kernel;
