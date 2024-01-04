@@ -568,6 +568,7 @@ public class ChatPlugin
         var client = this._httpClientFactory.CreateClient("GetDataFromIndex");
         client.DefaultRequestHeaders.Add("api-key", this._azureAISearchOptions.APIKey);
         // TODO: sanitize the odataFilter value
+        odataFilter = odataFilter.Replace("$filter=", string.Empty);
         var response = await client.GetAsync($"{this._azureAISearchOptions.Endpoint}/indexes('{this._azureAISearchOptions.IndexName}')/docs?$filter={odataFilter}&api-version=2023-11-01");
         return await response.Content.ReadAsStringAsync();
     }
